@@ -29,6 +29,22 @@ function parseDbUrl(databaseUrl: string) {
   };
 }
 
+function loadCaPem(): string | undefined {
+  // ✅ Render-friendly: CA por variable de entorno multilínea
+  const fromEnv = process.env.DB_SSL_CA_PEM;
+  if (fromEnv && fromEnv.trim().length > 0) return fromEnv;
+
+  // ✅ Local/dev: CA desde archivo
+  const caPathEnv = process.env.DB_SSL_CA_PATH || "tidb-ca.pem";
+  const caPath = path.resolve(process.cwd(), caPathEnv);
+
+  if (fs.existsSync(caPath)) {
+    return fs.readFileSync(caPath, "utf8");
+  }
+
+  return undefined;
+}
+
 function getPool() {
   if (_pool) return _pool;
 
@@ -38,8 +54,23 @@ function getPool() {
   const { host, port, user, password, database } = parseDbUrl(databaseUrl);
 
   const sslEnabled = process.env.DB_SSL === "true";
-  const caPathEnv = process.env.DB_SSL_CA_PATH || "tidb-ca.pem";
-  const caPath = path.resolve(process.cwd(), caPathEnv);
+
+  let sslConfig: mysql.ConnectionOptions["ssl"] | undefined;
+  if (sslEnabled) {
+    const caPem = loadCaPem();
+
+    if (!caPem) {
+      console.warn(
+        "[Database] DB_SSL=true pero no se encontró CA. " +
+          "Configura DB_SSL_CA_PEM (recomendado en Render) o DB_SSL_CA_PATH (archivo local)."
+      );
+    }
+
+    sslConfig = {
+      rejectUnauthorized: true,
+      ...(caPem ? { ca: caPem } : {}),
+    };
+  }
 
   _pool = mysql.createPool({
     host,
@@ -51,14 +82,7 @@ function getPool() {
     connectionLimit: 5,
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
-    ...(sslEnabled
-      ? {
-          ssl: {
-            rejectUnauthorized: true,
-            ca: fs.readFileSync(caPath, "utf8"),
-          },
-        }
-      : {}),
+    ...(sslEnabled ? { ssl: sslConfig } : {}),
   });
 
   return _pool;
@@ -205,7 +229,8 @@ export async function getTransactionsByUser(
   if (filters?.type) conditions.push(eq(transactions.type, filters.type));
   if (filters?.categoryId) conditions.push(eq(transactions.categoryId, filters.categoryId));
   if (filters?.conceptId) conditions.push(eq(transactions.conceptId, filters.conceptId));
-  if (filters?.conceptIds?.length) conditions.push(inArray(transactions.conceptId, filters.conceptIds));
+  if (filters?.conceptIds?.length)
+    conditions.push(inArray(transactions.conceptId, filters.conceptIds));
   if (filters?.month) conditions.push(eq(transactions.month, filters.month));
   if (filters?.year) conditions.push(eq(transactions.year, filters.year));
 
@@ -234,14 +259,17 @@ export async function updateTransaction(id: number, userId: number, data: Partia
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  return db.update(transactions).set({ ...data, updatedAt: new Date() }).where(
-    and(eq(transactions.id, id), eq(transactions.userId, userId))
-  );
+  return db
+    .update(transactions)
+    .set({ ...data, updatedAt: new Date() })
+    .where(and(eq(transactions.id, id), eq(transactions.userId, userId)));
 }
 
 export async function deleteTransaction(id: number, userId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  return db.delete(transactions).where(and(eq(transactions.id, id), eq(transactions.userId, userId)));
+  return db
+    .delete(transactions)
+    .where(and(eq(transactions.id, id), eq(transactions.userId, userId)));
 }
